@@ -1,122 +1,165 @@
-#Step 1
-import inception_resnet_v1
-
-#Step 2
-model = inception_resnet_v1.InceptionResNetV1()
-model.load_weights('keras-facenet-h5/facenet_keras_weights.h5')
-
-# Fix from https://community.deeplearning.ai/t/problems-when-i-implemented-my-own-face-recognition-projects/396496/13 when facenet_keras not loading
-
-import cv2
-from mtcnn import MTCNN
-from keras.models import load_model
-import numpy as np
-import sqlite3
-from PyQt5 import QtWidgets, QtCore
+import os
+import pickle
 import sys
-import threading
+import cv2
+import numpy as np
+import face_recognition
+from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QListWidget
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QImage, QPixmap
 
-# Initialize face detector and models
-detector = MTCNN()
-facenet_model = load_model('facenet_keras.h5')
-age_model = load_model('age_model.h5')
-gender_model = load_model('gender_model.h5')
+class FaceRecognizer:
+    def __init__(self):
+        self.db_file = 'face_database.pkl'
+        self.load_database()
+        self.gender_net = cv2.dnn.readNetFromCaffe(
+            'data/deploy_gender.prototxt',
+            'data/gender_net.caffemodel'
+        )
+        self.age_net = cv2.dnn.readNetFromCaffe(
+            'data/deploy_age.prototxt',
+            'data/age_net.caffemodel'
+        )
+        self.gender_list = ['Male', 'Female']
+        self.age_list = ['(0-2)', '(4-6)', '(8-12)', '(15-20)', '(25-32)', '(38-43)', '(48-53)', '(60-100)']
 
-# Database setup
-conn = sqlite3.connect('faces.db')
-c = conn.cursor()
-c.execute('''CREATE TABLE IF NOT EXISTS faces
-             (id INTEGER PRIMARY KEY, embedding BLOB, age INTEGER, gender TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+    def load_database(self):
+        if os.path.exists(self.db_file):
+            with open(self.db_file, 'rb') as f:
+                data = pickle.load(f)
+                self.known_face_encodings = data['encodings']
+                self.known_face_info = data['info']
+                self.face_count = data['count']
+        else:
+            self.known_face_encodings = []
+            self.known_face_info = []
+            self.face_count = 0
 
-def detect_faces(frame):
-    return detector.detect_faces(frame)
+    def save_database(self):
+        data = {
+            'encodings': self.known_face_encodings,
+            'info': self.known_face_info,
+            'count': self.face_count
+        }
+        with open(self.db_file, 'wb') as f:
+            pickle.dump(data, f)
 
-def extract_embeddings(face):
-    face = cv2.resize(face, (160, 160))
-    face = face.astype('float32')
-    mean, std = face.mean(), face.std()
-    face = (face - mean) / std
-    samples = np.expand_dims(face, axis=0)
-    embeddings = facenet_model.predict(samples)
-    return embeddings[0]
+    def recognize_face(self, frame):
+        small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
+        rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+        face_locations = face_recognition.face_locations(rgb_small_frame)
+        face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
+        face_names = []
+        for face_encoding in face_encodings:
+            name = "Unknown"
+            gender = "Unknown"
+            age = "Unknown"
+            if self.known_face_encodings:
+                matches = face_recognition.compare_faces(self.known_face_encodings, face_encoding)
+                if True in matches:
+                    first_match_index = matches.index(True)
+                    name, gender, age = self.known_face_info[first_match_index]
+                else:
+                    self.face_count += 1
+                    name = f"Person_{self.face_count}"
+                    face_location = face_locations[face_encodings.index(face_encoding)]
+                    gender = self.estimate_gender(rgb_small_frame, face_location)
+                    age = self.estimate_age(rgb_small_frame, face_location)
+                    self.known_face_encodings.append(face_encoding)
+                    self.known_face_info.append((name, gender, age))
+            else:
+                self.face_count += 1
+                name = f"Person_{self.face_count}"
+                face_location = face_locations[face_encodings.index(face_encoding)]
+                gender = self.estimate_gender(rgb_small_frame, face_location)
+                age = self.estimate_age(rgb_small_frame, face_location)
+                self.known_face_encodings.append(face_encoding)
+                self.known_face_info.append((name, gender, age))
+            face_names.append((name, gender, age))
+        self.save_database()
+        return face_locations, face_names
 
-def estimate_age(face):
-    face = cv2.resize(face, (64, 64))
-    face = face.astype('float32')
-    face = face / 255.0
-    samples = np.expand_dims(face, axis=0)
-    age = age_model.predict(samples)
-    return int(age[0][0])
+    def estimate_gender(self, face_image, face_location):
+        top, right, bottom, left = face_location
+        face = face_image[top:bottom, left:right]
+        blob = cv2.dnn.blobFromImage(face, 1, (227, 227), (78.4263377603, 87.7689143744, 114.895847746), swapRB=False)
+        self.gender_net.setInput(blob)
+        gender_preds = self.gender_net.forward()
+        gender = self.gender_list[gender_preds[0].argmax()]
+        return gender
 
-def estimate_gender(face):
-    face = cv2.resize(face, (64, 64))
-    face = face.astype('float32')
-    face = face / 255.0
-    samples = np.expand_dims(face, axis=0)
-    gender = gender_model.predict(samples)
-    return 'Male' if gender[0][0] > 0.5 else 'Female'
+    def estimate_age(self, face_image, face_location):
+        top, right, bottom, left = face_location
+        face = face_image[top:bottom, left:right]
+        blob = cv2.dnn.blobFromImage(face, 1, (227, 227), (78.4263377603, 87.7689143744, 114.895847746), swapRB=False)
+        self.age_net.setInput(blob)
+        age_preds = self.age_net.forward()
+        age = self.age_list[age_preds[0].argmax()]
+        return age
 
-def store_face(embedding, age, gender):
-    c.execute("INSERT INTO faces (embedding, age, gender) VALUES (?, ?, ?)", (embedding.tobytes(), age, gender))
-    conn.commit()
-
-def get_unique_face_count():
-    c.execute("SELECT COUNT(DISTINCT embedding) FROM faces")
-    return c.fetchone()[0]
-
-class FaceStatsApp(QtWidgets.QWidget):
+class FaceRecognitionGUI(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.initUI()
-        
-    def initUI(self):
-        self.setGeometry(100, 100, 400, 300)
-        self.setWindowTitle('Face Stats')
-        
-        self.label = QtWidgets.QLabel(self)
-        self.label.setText("Unique Faces: 0")
-        self.label.move(20, 20)
-        
-        self.timer = QtCore.QTimer(self)
-        self.timer.timeout.connect(self.update_stats)
-        self.timer.start(1000)  # Update every second
+        self.setWindowTitle("Face Recognition Statistics")
+        self.setGeometry(100, 100, 800, 600)
+        self.face_recognizer = FaceRecognizer()
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        layout = QHBoxLayout()
+        central_widget.setLayout(layout)
+        self.video_label = QLabel()
+        layout.addWidget(self.video_label)
+        stats_layout = QVBoxLayout()
+        layout.addLayout(stats_layout)
+        self.total_faces_label = QLabel("Total Unique Faces: 0")
+        stats_layout.addWidget(self.total_faces_label)
+        self.current_face_label = QLabel("Current Face: None")
+        stats_layout.addWidget(self.current_face_label)
+        stats_layout.addWidget(QLabel("Recently Detected Faces:"))
+        self.recent_faces_list = QListWidget()
+        stats_layout.addWidget(self.recent_faces_list)
+        self.cap = cv2.VideoCapture(0)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_frame)
+        self.timer.start(30)
 
-        self.show()
+    def update_frame(self):
+        ret, frame = self.cap.read()
+        if ret:
+            face_locations, face_info = self.face_recognizer.recognize_face(frame)
+            for (top, right, bottom, left), (name, gender, age) in zip(face_locations, face_info):
+                top *= 4
+                right *= 4
+                bottom *= 4
+                left *= 4
+                cv2.rectangle(frame, (left, top), (right, bottom), (0, 0, 255), 2)
+                cv2.rectangle(frame, (left, bottom - 35), (right, bottom), (0, 0, 255), cv2.FILLED)
+                font = cv2.FONT_HERSHEY_DUPLEX
+                cv2.putText(frame, f"{name}, {gender}, {age}", (left + 6, bottom - 6), font, 0.5, (255, 255, 255), 1)
+            if face_info:
+                self.current_face_label.setText(f"Current Face: {face_info[0][0]}, {face_info[0][1]}, {face_info[0][2]}")
+                self.update_recent_faces(f"{face_info[0][0]}, {face_info[0][1]}, {face_info[0][2]}")
+            else:
+                self.current_face_label.setText("Current Face: None")
+            self.total_faces_label.setText(f"Total Unique Faces: {self.face_recognizer.face_count}")
+            rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb_image.shape
+            bytes_per_line = ch * w
+            qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(qt_image)
+            self.video_label.setPixmap(pixmap)
 
-    def update_stats(self):
-        unique_faces = get_unique_face_count()
-        self.label.setText(f"Unique Faces: {unique_faces}")
+    def update_recent_faces(self, face_info):
+        self.recent_faces_list.insertItem(0, face_info)
+        if self.recent_faces_list.count() > 10:
+            self.recent_faces_list.takeItem(10)
 
-def process_video():
-    cap = cv2.VideoCapture(0)
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        
-        faces = detect_faces(frame)
-        for face in faces:
-            x, y, width, height = face['box']
-            face_img = frame[y:y+height, x:x+width]
-            embeddings = extract_embeddings(face_img)
-            age = estimate_age(face_img)
-            gender = estimate_gender(face_img)
-            store_face(embeddings, age, gender)
-            cv2.rectangle(frame, (x, y), (x + width, y + height), (0, 255, 0), 2)
+    def closeEvent(self, event):
+        self.cap.release()
+        self.face_recognizer.save_database()
 
-        cv2.imshow('Video', frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
-
-if __name__ == "__main__":
-    app = QtWidgets.QApplication(sys.argv)
-    ex = FaceStatsApp()
-
-    # Start video processing in a separate thread
-    video_thread = threading.Thread(target=process_video)
-    video_thread.start()
-
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    window = FaceRecognitionGUI()
+    window.show()
     sys.exit(app.exec_())
