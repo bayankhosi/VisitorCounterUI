@@ -1,3 +1,4 @@
+#pip install opencv-python face_recognition numpy pyqt5
 import os
 import pickle
 import sys
@@ -114,7 +115,7 @@ class FaceRecognizer:
         top, right, bottom, left = face_location
         face = face_image[top:bottom, left:right]
 
-        # Prepare image for gender prediction
+        # Prepare image for gender prediction by resizing and subtracting mean values (normalizing pixels)
         blob = cv2.dnn.blobFromImage(face, 1, (227, 227), (78.4263377603, 87.7689143744, 114.895847746), swapRB=False)
 
         # Set input to gender detection model and perform forward pass
@@ -145,7 +146,7 @@ class FaceRecognizer:
 
 class FaceRecognitionGUI(QMainWindow):
     def __init__(self):
-        super().__init__()
+        super().__init__() #inheriting from the pyqt module called
         self.setWindowTitle("Face Recognition Statistics")
         self.setGeometry(100, 100, 800, 600)
 
