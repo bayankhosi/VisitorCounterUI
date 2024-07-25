@@ -1,4 +1,4 @@
-#pip install opencv-python face_recognition numpy pyqt5
+#pip install opencv-python-headless face_recognition pyqt5
 import os
 import pickle
 import sys
@@ -181,7 +181,8 @@ class FaceRecognitionGUI(QMainWindow):
         stats_layout.addWidget(self.recent_faces_list)
 
         # Open video capture device
-        self.cap = cv2.VideoCapture(0)
+        # self.cap = cv2.VideoCapture(0)
+        self.cap = cv2.VideoCapture('/home/bayanda/Downloads/vid.mp4')
 
         # Timer for updating video feed
         self.timer = QTimer(self)
